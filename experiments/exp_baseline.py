@@ -30,7 +30,7 @@ from src.metrics import (
     save_figure,
 )
 from src.sensors import GEOMETRY_LABELS, get_geometry
-from src.trajectory import make_zigzag
+from src.trajectory import make_zigzag, smooth_mask
 
 SIGMA_A = 10.0
 PRIOR_P = np.array([3000.0, 4000.0])
@@ -128,18 +128,6 @@ def plot_baseline(results: dict) -> None:
     plt.close(fig)
 
 
-TURN_STEPS = (24, 48, 72, 96)
-TURN_WINDOW = 4
-
-
-def _smooth_mask(K: int) -> np.ndarray:
-    mask = np.ones(K, dtype=bool)
-    mask[:5] = False
-    for ts in TURN_STEPS:
-        mask[ts : ts + TURN_WINDOW] = False
-    return mask
-
-
 def _rmse(err: np.ndarray, mask: np.ndarray) -> float:
     return float(np.sqrt(np.mean(err[mask] ** 2)))
 
@@ -157,7 +145,7 @@ def main() -> None:
     K = len(err_ekf)
     overall = np.zeros(K, dtype=bool)
     overall[5:] = True
-    smooth = _smooth_mask(K)
+    smooth = smooth_mask(K)
 
     rmse_lse_overall = _rmse(err_lse, overall)
     rmse_ekf_overall = _rmse(err_ekf, overall)

@@ -6,6 +6,44 @@ import numpy as np
 
 from . import DURATION, SAMPLE_PERIOD, TARGET_SPEED
 
+# Step indices where the default zig-zag changes heading. Default trajectory has
+# 5 legs of 24 steps each (60 s / 5 / 0.5 s), so heading flips occur on the
+# boundaries 24, 48, 72, 96. TURN_WINDOW is the number of steps after each flip
+# during which the CV-EKF is still washing out the prediction error.
+TURN_STEPS: tuple[int, ...] = (24, 48, 72, 96)
+TURN_WINDOW: int = 4
+
+
+def smooth_mask(
+    K: int,
+    warmup: int = 5,
+    turn_steps: tuple[int, ...] = TURN_STEPS,
+    turn_window: int = TURN_WINDOW,
+) -> np.ndarray:
+    """Boolean mask of length K, True on steady-state, between-turn steps.
+
+    Excludes the first `warmup` steps (filter convergence) and a `turn_window`-
+    step transient after each heading change.
+    """
+    mask = np.ones(K, dtype=bool)
+    if warmup > 0:
+        mask[:warmup] = False
+    for ts in turn_steps:
+        mask[ts : ts + turn_window] = False
+    return mask
+
+
+def turn_mask(
+    K: int,
+    turn_steps: tuple[int, ...] = TURN_STEPS,
+    turn_window: int = TURN_WINDOW,
+) -> np.ndarray:
+    """Boolean mask of length K, True only during the post-turn transient."""
+    mask = np.zeros(K, dtype=bool)
+    for ts in turn_steps:
+        mask[ts : ts + turn_window] = True
+    return mask
+
 
 def make_zigzag(
     duration: float = DURATION,

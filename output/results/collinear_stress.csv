@@ -1,0 +1,4 @@
+prior_label,prior_x_m,prior_y_m,rmse_lse_m,rmse_ekf_m
+above (correct side),3000.0,4000.0,3.892807542722247,4.3098102301653896
+below (mirror image),3000.0,-4000.0,10763.050368794628,10763.10630584011
+on the sensor line ,5000.0,0.0,5640.955235292203,5640.939948263815

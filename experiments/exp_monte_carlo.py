@@ -23,7 +23,7 @@ from src.lse import initialize_state, lse_track
 from src.measurements import simulate_toa, to_range
 from src.metrics import OUTPUT_RESULTS, position_error, save_csv, save_figure
 from src.sensors import GEOMETRY_LABELS, get_geometry
-from src.trajectory import make_zigzag
+from src.trajectory import make_zigzag, smooth_mask, turn_mask
 
 SIGMA_A = 10.0
 PRIOR_P = np.array([3000.0, 4000.0])
@@ -55,6 +55,11 @@ def _run_trial(geometry: str, seed: int, states_truth: np.ndarray) -> tuple[np.n
     return err_lse, err_ekf
 
 
+def _bucket_rmse(err_mat: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Per-trial RMSE restricted to columns where `mask` is True."""
+    return np.sqrt(np.mean(err_mat[:, mask] ** 2, axis=1))
+
+
 def run_mc_for_cell(geometry: str, n_trials: int = N_TRIALS) -> dict:
     states_truth, times = make_zigzag()
     K = len(times)
@@ -65,16 +70,21 @@ def run_mc_for_cell(geometry: str, n_trials: int = N_TRIALS) -> dict:
         err_lse_mat[i] = e_lse
         err_ekf_mat[i] = e_ekf
 
-    rmse_lse = np.sqrt(np.mean(err_lse_mat[:, 5:] ** 2, axis=1))
-    rmse_ekf = np.sqrt(np.mean(err_ekf_mat[:, 5:] ** 2, axis=1))
+    overall_mask = np.zeros(K, dtype=bool)
+    overall_mask[5:] = True
+    smooth = smooth_mask(K)
+    turn = turn_mask(K)
+
     return {
         "err_lse_mat": err_lse_mat,
         "err_ekf_mat": err_ekf_mat,
         "times": times,
-        "rmse_lse_mean": float(np.mean(rmse_lse)),
-        "rmse_lse_std": float(np.std(rmse_lse)),
-        "rmse_ekf_mean": float(np.mean(rmse_ekf)),
-        "rmse_ekf_std": float(np.std(rmse_ekf)),
+        "rmse_lse_overall": _bucket_rmse(err_lse_mat, overall_mask),
+        "rmse_ekf_overall": _bucket_rmse(err_ekf_mat, overall_mask),
+        "rmse_lse_smooth": _bucket_rmse(err_lse_mat, smooth),
+        "rmse_ekf_smooth": _bucket_rmse(err_ekf_mat, smooth),
+        "rmse_lse_turn": _bucket_rmse(err_lse_mat, turn),
+        "rmse_ekf_turn": _bucket_rmse(err_ekf_mat, turn),
     }
 
 
@@ -111,10 +121,10 @@ def plot_panel_grid(all_data: dict[str, dict]) -> None:
 
 def plot_summary_bars(all_data: dict[str, dict]) -> None:
     labels = [GEOMETRY_LABELS[n] for n in CELL_ORDER]
-    rmse_lse = [all_data[n]["rmse_lse_mean"] for n in CELL_ORDER]
-    rmse_lse_std = [all_data[n]["rmse_lse_std"] for n in CELL_ORDER]
-    rmse_ekf = [all_data[n]["rmse_ekf_mean"] for n in CELL_ORDER]
-    rmse_ekf_std = [all_data[n]["rmse_ekf_std"] for n in CELL_ORDER]
+    rmse_lse = [float(np.mean(all_data[n]["rmse_lse_overall"])) for n in CELL_ORDER]
+    rmse_lse_std = [float(np.std(all_data[n]["rmse_lse_overall"])) for n in CELL_ORDER]
+    rmse_ekf = [float(np.mean(all_data[n]["rmse_ekf_overall"])) for n in CELL_ORDER]
+    rmse_ekf_std = [float(np.std(all_data[n]["rmse_ekf_overall"])) for n in CELL_ORDER]
     x = np.arange(len(labels))
     width = 0.38
 
@@ -153,6 +163,45 @@ def plot_summary_bars(all_data: dict[str, dict]) -> None:
     plt.close(fig)
 
 
+def plot_smooth_vs_turn(all_data: dict[str, dict]) -> None:
+    """Side-by-side EKF RMSE on smooth segments vs turn windows.
+
+    The smooth bars should sit at or near the σ_r/√N bound; the turn-window
+    bars expose the CV-EKF lag at each heading change.
+    """
+    labels = [GEOMETRY_LABELS[n] for n in CELL_ORDER]
+    smooth_mean = [float(np.mean(all_data[n]["rmse_ekf_smooth"])) for n in CELL_ORDER]
+    smooth_std = [float(np.std(all_data[n]["rmse_ekf_smooth"])) for n in CELL_ORDER]
+    turn_mean = [float(np.mean(all_data[n]["rmse_ekf_turn"])) for n in CELL_ORDER]
+    turn_std = [float(np.std(all_data[n]["rmse_ekf_turn"])) for n in CELL_ORDER]
+    x = np.arange(len(labels))
+    width = 0.38
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    ax.bar(
+        x - width / 2, smooth_mean, width, yerr=smooth_std,
+        capsize=4, color="C2", alpha=0.85, label="EKF — smooth segments",
+    )
+    ax.bar(
+        x + width / 2, turn_mean, width, yerr=turn_std,
+        capsize=4, color="C1", alpha=0.85, label="EKF — turn windows",
+    )
+    bound = SIGMA_R / np.sqrt(np.array([2, 2, 3, 3, 4, 4]))
+    ax.plot(x, bound, "k--", lw=1.0, alpha=0.7, label="σ_r/√N (theoretical)")
+    ax.set_yscale("log")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=9)
+    ax.set_ylabel("position RMSE [m] (log)")
+    ax.set_title(
+        f"EKF RMSE — smooth vs turn windows ({N_TRIALS} trials, ±2 steps around each turn)"
+    )
+    ax.grid(True, axis="y", which="both", alpha=0.3)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    save_figure(fig, "mc_rmse_smooth_vs_turn.png")
+    plt.close(fig)
+
+
 def main() -> None:
     all_data: dict[str, dict] = {}
     for name in CELL_ORDER:
@@ -161,24 +210,52 @@ def main() -> None:
 
     plot_panel_grid(all_data)
     plot_summary_bars(all_data)
+    plot_smooth_vs_turn(all_data)
+
+    def _ms(arr: np.ndarray) -> str:
+        return f"{float(np.mean(arr)):.2f} ± {float(np.std(arr)):.2f}"
 
     print(
-        f"\n{'cell':<32s} {'LSE mean ± std [m]':>22s} {'EKF mean ± std [m]':>22s}"
+        f"\n{'cell':<32s} "
+        f"{'EKF overall [m]':>17s} {'EKF smooth [m]':>17s} {'EKF turns [m]':>17s}"
     )
-    print("-" * 80)
+    print("-" * 90)
     for name in CELL_ORDER:
         d = all_data[name]
-        lse_str = f"{d['rmse_lse_mean']:.2f} ± {d['rmse_lse_std']:.2f}"
-        ekf_str = f"{d['rmse_ekf_mean']:.2f} ± {d['rmse_ekf_std']:.2f}"
-        print(f"{GEOMETRY_LABELS[name]:<32s} {lse_str:>22s} {ekf_str:>22s}")
+        print(
+            f"{GEOMETRY_LABELS[name]:<32s} "
+            f"{_ms(d['rmse_ekf_overall']):>17s} "
+            f"{_ms(d['rmse_ekf_smooth']):>17s} "
+            f"{_ms(d['rmse_ekf_turn']):>17s}"
+        )
 
     save_csv(
         {
             "geometry": [GEOMETRY_LABELS[n] for n in CELL_ORDER],
-            "rmse_lse_mean_m": [all_data[n]["rmse_lse_mean"] for n in CELL_ORDER],
-            "rmse_lse_std_m": [all_data[n]["rmse_lse_std"] for n in CELL_ORDER],
-            "rmse_ekf_mean_m": [all_data[n]["rmse_ekf_mean"] for n in CELL_ORDER],
-            "rmse_ekf_std_m": [all_data[n]["rmse_ekf_std"] for n in CELL_ORDER],
+            "rmse_lse_overall_mean_m": [
+                float(np.mean(all_data[n]["rmse_lse_overall"])) for n in CELL_ORDER
+            ],
+            "rmse_lse_overall_std_m": [
+                float(np.std(all_data[n]["rmse_lse_overall"])) for n in CELL_ORDER
+            ],
+            "rmse_ekf_overall_mean_m": [
+                float(np.mean(all_data[n]["rmse_ekf_overall"])) for n in CELL_ORDER
+            ],
+            "rmse_ekf_overall_std_m": [
+                float(np.std(all_data[n]["rmse_ekf_overall"])) for n in CELL_ORDER
+            ],
+            "rmse_ekf_smooth_mean_m": [
+                float(np.mean(all_data[n]["rmse_ekf_smooth"])) for n in CELL_ORDER
+            ],
+            "rmse_ekf_smooth_std_m": [
+                float(np.std(all_data[n]["rmse_ekf_smooth"])) for n in CELL_ORDER
+            ],
+            "rmse_ekf_turn_mean_m": [
+                float(np.mean(all_data[n]["rmse_ekf_turn"])) for n in CELL_ORDER
+            ],
+            "rmse_ekf_turn_std_m": [
+                float(np.std(all_data[n]["rmse_ekf_turn"])) for n in CELL_ORDER
+            ],
         },
         "mc_summary.csv",
     )
